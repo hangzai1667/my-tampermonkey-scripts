@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         右键链接增强器
+// @name         右键链接复制器 增强版
 // @namespace    http://tampermonkey.net/
 // @version      3.0
 // @description  右键链接快速复制文字、地址及多种格式，智能识别选中文本和图片，支持从链接另存文件，支持复制图片到剪贴板，可自定义分组排序
