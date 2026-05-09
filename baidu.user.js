@@ -8,8 +8,8 @@
 // @icon         https://www.baidu.com/favicon.ico
 // @grant        GM_registerMenuCommand
 // @run-at       document-idle
-// @downloadURL  
-// @updateURL    
+// @downloadURL  https://cdn.jsdelivr.net/gh/hangzai1667/my-tampermonkey-scripts@main/baidu.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/hangzai1667/my-tampermonkey-scripts@main/baidu.user.js
 // ==/UserScript==
 
 (function() {
