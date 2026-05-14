@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微博净化器·内容屏蔽助手
 // @namespace    http://tampermonkey.net/
-// @version      7.1
-// @description  信息流屏蔽+正文屏蔽+导航屏蔽+侧边栏屏蔽+评论用户屏蔽（完整线程）+自定义分组屏蔽+广告图片屏蔽+搜索页横幅广告屏蔽
+// @version      7.3
+// @description  信息流屏蔽+正文屏蔽+导航屏蔽+侧边栏屏蔽+评论用户屏蔽+自定义分组屏蔽+广告图片屏蔽+搜索页组合广告屏蔽(深度优化防漏判版)
 // @author       MRBANK
 // @match        https://weibo.com/*
 // @match        https://*.weibo.com/*
@@ -79,7 +79,7 @@
             tagContainer: '.wbpro-tag div, .wbpro-tag, p.from > span',
             feedContent: '[class*="_wbtext_"], [class*="Feed_content"] [class*="txt"], [class*="content"] [class*="txt"], p.txt',
             sidebarModule: '.wbpro-side',
-            sidebarTitle: '.wbpro-side-tit .f16.fm.cla'
+            sidebarTitle: '.wbpro-side-tit [class*="cla"], .wbpro-side-tit > div' // 修复：兼容f14/f16等多种标题类名
         }
     };
 
@@ -108,7 +108,7 @@
 
     function log(message, type = 'info', data = null) {
         if (!CONFIG.debugMode && type !== 'error') return;
-        const prefix = '【微博屏蔽 v6.9】';
+        const prefix = '【微博屏蔽 v7.2】';
         const timestamp = new Date().toLocaleTimeString();
         switch(type) {
             case 'error': console.error(`${prefix}[${timestamp}]`, message, data || ''); break;
@@ -237,7 +237,7 @@
         return true;
     }
 
-    // 信息流屏蔽（精准定位 action-type，避免误杀同级横幅广告）
+    // 信息流屏蔽（防异步漏判 + 防拆字去空格优化）
     function processFeedItems() {
         if (!CONFIG.blockAds) return;
         const startTime = performanceMonitor.start();
@@ -249,16 +249,19 @@
 
         Array.from(feedItems).slice(0, CONFIG.batchSize).forEach(container => {
             try {
-                container.setAttribute('data-processed', 'true');
                 let shouldBlock = false;
                 let blockReason = '';
 
                 const isSearchCard = container.matches('div.card-wrap[action-type="feed_list_item"]');
 
                 const tagElements = container.querySelectorAll(CONFIG.selectors.tagContainer);
-                if (tagElements.length > 0) {
+                // 判断标签是否已经渲染出来
+                let hasTagsRendered = tagElements.length > 0 && Array.from(tagElements).some(el => el.textContent.trim().length > 0);
+
+                if (hasTagsRendered) {
                     for (let i = 0; i < tagElements.length; i++) {
-                        const tagText = tagElements[i].textContent.trim();
+                        // 优化：去除所有空格和换行，防止微博拆字防屏蔽（如 <span>广</span><span>告</span>）
+                        const tagText = tagElements[i].textContent.replace(/\s+/g, '');
                         if (tagText) {
                             const matchedTag = enabledTagKeywords.find(kw => tagText.includes(kw.text));
                             if (matchedTag) {
@@ -282,6 +285,7 @@
                 }
 
                 if (shouldBlock) {
+                    container.setAttribute('data-processed', 'true'); // 屏蔽了才彻底标记
                     if (isSearchCard) {
                         if (!container.classList.contains('weibo-ad-blocked')) {
                             container.classList.add('weibo-ad-blocked');
@@ -296,6 +300,13 @@
                             log(`屏蔽首页信息流: ${blockReason}`, 'success');
                         }
                     }
+                } else {
+                    // 如果没屏蔽，判断是否已经渲染完毕
+                    // 如果有标签了，或者有正文内容了，说明渲染完毕且安全，打上标记不再扫描
+                    if (hasTagsRendered || getContentText(container)) {
+                        container.setAttribute('data-processed', 'true');
+                    }
+                    // 否则：既没标签又没正文，可能还在异步加载，不标记，留给下一次扫描
                 }
             } catch (e) { log('处理信息流出错', 'error', e); }
         });
@@ -439,23 +450,39 @@
         const startTime = performanceMonitor.start();
         let blockedCount = 0;
         try {
-            document.querySelectorAll('.item1 .text > a[href*="/u/"]').forEach(link => {
+            // 1. 处理主评论
+            document.querySelectorAll('.item1 > .item1in .text > a[href*="/u/"]').forEach(link => {
                 const commentUnit = link.closest('.item1');
-                if (!commentUnit || commentUnit.closest('.weibo-comment-blocked') || commentUnit.hasAttribute('data-comment-unit-processed')) return;
+                if (!commentUnit || commentUnit.closest('.weibo-comment-blocked') || commentUnit.hasAttribute('data-comment-main-processed')) return;
                 const authorName = link.textContent.trim();
                 if (enabledUsers.includes(authorName)) {
                     commentUnit.classList.add('weibo-comment-blocked');
-                    commentUnit.setAttribute('data-comment-unit-processed', 'true');
                     let next = commentUnit.nextElementSibling;
                     while (next && !next.classList.contains('item1')) {
                         next.classList.add('weibo-comment-blocked');
-                        next.setAttribute('data-comment-unit-processed', 'true');
                         next = next.nextElementSibling;
                     }
                     blockedCount++;
                     performanceMonitor.stats.blockedComments++;
-                    log(`屏蔽评论线程: 用户 "${authorName}"`, 'success');
-                } else commentUnit.setAttribute('data-comment-unit-processed', 'true');
+                    log(`屏蔽评论线程(主评论): 用户 "${authorName}"`, 'success');
+                }
+                // 无论是否屏蔽，标记主评论已处理，避免影响子评论判断
+                commentUnit.setAttribute('data-comment-main-processed', 'true');
+            });
+
+            // 2. 处理二级回复
+            document.querySelectorAll('.item2 .text > a[href*="/u/"]').forEach(link => {
+                const subCommentUnit = link.closest('.item2');
+                if (!subCommentUnit || subCommentUnit.closest('.weibo-comment-blocked') || subCommentUnit.hasAttribute('data-comment-sub-processed')) return;
+                const authorName = link.textContent.trim();
+                if (enabledUsers.includes(authorName)) {
+                    subCommentUnit.classList.add('weibo-comment-blocked');
+                    blockedCount++;
+                    performanceMonitor.stats.blockedComments++;
+                    log(`屏蔽二级回复: 用户 "${authorName}"`, 'success');
+                }
+                // 无论是否屏蔽，标记该二级回复已处理
+                subCommentUnit.setAttribute('data-comment-sub-processed', 'true');
             });
         } catch (e) { log('处理评论出错', 'error', e); }
         if (blockedCount) log(`本次屏蔽评论线程 ${blockedCount} 个`, 'info');
@@ -520,7 +547,7 @@
         log('广告图片属性监听器启动', 'success');
     }
 
-    // ========== 搜索页横幅图片广告屏蔽（精准命中自身，不牵连父级） ==========
+    // ========== 搜索页横幅图片广告屏蔽（精准命中组合广告容器） ==========
     function processSearchBannerAds() {
         if (!CONFIG.blockSearchBannerAds) return;
         const startTime = performanceMonitor.start();
@@ -530,12 +557,16 @@
                 iconContainer.setAttribute('data-search-ad-processed', 'true');
                 const icon = iconContainer.querySelector('i[style*="simg.s.weibo.com/imgtool"]');
                 if (icon) {
-                    // 修复：直接隐藏 card-pic-a 容器，不向上寻找 wrap-continuous，避免连带隐藏微博
-                    if (!iconContainer.classList.contains('weibo-ad-blocked')) {
-                        iconContainer.classList.add('weibo-ad-blocked');
+                    // 优化：向上寻找包含图文组合的 wrap-continuous 容器
+                    const adWrap = iconContainer.closest('div.card-wrap.wrap-continuous');
+                    // 如果找到了大容器，就隐藏大容器；找不到，退而求其次只隐藏图片横幅
+                    const targetToHide = adWrap || iconContainer;
+
+                    if (!targetToHide.classList.contains('weibo-ad-blocked')) {
+                        targetToHide.classList.add('weibo-ad-blocked');
                         blockedCount++;
                         performanceMonitor.stats.blockedItems++;
-                        log('屏蔽搜索页横幅广告', 'success');
+                        log(`屏蔽搜索页组合广告 (包含横幅与推广微博)`, 'success');
                     }
                 }
             });
@@ -717,12 +748,14 @@
                 }
             });
             log('配置已保存并应用', 'success');
-            document.querySelectorAll('.weibo-ad-blocked, .weibo-topnav-blocked, .weibo-sidebar-blocked, .weibo-comment-blocked, .weibo-content-blocked, .weibo-ad-image-blocked, [data-processed="true"], [data-sidebar-processed="true"], [data-comment-processed="true"], [data-comment-unit-processed="true"], [data-flat-processed="true"], [data-ad-img-processed="true"], [data-search-ad-processed="true"]').forEach(el => {
+            document.querySelectorAll('.weibo-ad-blocked, .weibo-topnav-blocked, .weibo-sidebar-blocked, .weibo-comment-blocked, .weibo-content-blocked, .weibo-ad-image-blocked, [data-processed="true"], [data-sidebar-processed="true"], [data-comment-processed="true"], [data-comment-unit-processed="true"], [data-comment-main-processed="true"], [data-comment-sub-processed="true"], [data-flat-processed="true"], [data-ad-img-processed="true"], [data-search-ad-processed="true"]').forEach(el => {
                 el.classList.remove('weibo-ad-blocked', 'weibo-topnav-blocked', 'weibo-sidebar-blocked', 'weibo-comment-blocked', 'weibo-content-blocked', 'weibo-ad-image-blocked');
                 el.removeAttribute('data-processed');
                 el.removeAttribute('data-sidebar-processed');
                 el.removeAttribute('data-comment-processed');
                 el.removeAttribute('data-comment-unit-processed');
+                el.removeAttribute('data-comment-main-processed');
+                el.removeAttribute('data-comment-sub-processed');
                 el.removeAttribute('data-flat-processed');
                 el.removeAttribute('data-ad-img-processed');
                 el.removeAttribute('data-search-ad-processed');
@@ -793,10 +826,32 @@
 
     function setupScrollListener() { window.addEventListener('scroll', throttle(processContent, CONFIG.scrollThrottle), { passive: true }); }
 
+    // 新增：定时轮询兜底，防止 SPA 静默更新或异步渲染漏判
+    function setupPolling() {
+        setInterval(() => {
+            processContent();
+        }, 2500); // 每 2.5 秒扫描一次全页未处理节点
+    }
+
     function setupMenuCommands() {
         GM_registerMenuCommand('打开配置面板', openConfigUI);
         GM_registerMenuCommand('切换调试模式', () => { CONFIG.debugMode = !CONFIG.debugMode; GM_setValue('debugMode', CONFIG.debugMode); alert(`调试模式已${CONFIG.debugMode ? '开启' : '关闭'}`); location.reload(); });
         GM_registerMenuCommand('查看统计信息', () => { performanceMonitor.report(); alert(`已屏蔽内容统计：\n- 信息流: ${performanceMonitor.stats.blockedItems}\n- 侧边栏模块: ${performanceMonitor.stats.blockedSidebars}\n- 顶部导航: ${performanceMonitor.stats.blockedTopNav}\n- 评论: ${performanceMonitor.stats.blockedComments}\n- 广告图片: ${performanceMonitor.stats.blockedAdImages}\n- 执行时间: ${performanceMonitor.stats.executionTime.toFixed(2)}ms`); });
+        // 新增：手动全量重扫
+        GM_registerMenuCommand('⚡ 强制全量重扫页面', () => {
+            document.querySelectorAll('[data-processed="true"], [data-sidebar-processed="true"], [data-comment-unit-processed="true"], [data-comment-main-processed="true"], [data-comment-sub-processed="true"], [data-flat-processed="true"], [data-ad-img-processed="true"], [data-search-ad-processed="true"]').forEach(el => {
+                el.removeAttribute('data-processed');
+                el.removeAttribute('data-sidebar-processed');
+                el.removeAttribute('data-comment-unit-processed');
+                el.removeAttribute('data-comment-main-processed');
+                el.removeAttribute('data-comment-sub-processed');
+                el.removeAttribute('data-flat-processed');
+                el.removeAttribute('data-ad-img-processed');
+                el.removeAttribute('data-search-ad-processed');
+            });
+            processContent();
+            log('已执行强制全量重扫', 'success');
+        });
     }
 
     function injectUIStyles() {
@@ -879,14 +934,19 @@
             injectUIStyles();
             setTimeout(processContent, 500);
             setupObserver();
-            setupAdImageObserver();
             setupScrollListener();
+            setupAdImageObserver();
+            setupPolling();
             setupMenuCommands();
-            document.addEventListener('visibilitychange', () => { if (!document.hidden) processContent(); });
-            log('初始化完成', 'success');
-            if (CONFIG.debugMode) setInterval(() => performanceMonitor.report(), 30000);
-        } catch (e) { log('初始化失败', 'error', e); }
+            log('脚本初始化完成', 'success');
+        } catch (e) {
+            log('初始化失败', 'error', e);
+        }
     }
 
-    if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
 })();
