@@ -2,7 +2,7 @@
 // @name         微博净化器·内容屏蔽助手
 // @namespace    http://tampermonkey.net/
 // @version      7.3
-// @description  信息流屏蔽+正文屏蔽+导航屏蔽+侧边栏屏蔽+评论用户屏蔽+自定义分组屏蔽+广告图片屏蔽+搜索页组合广告屏蔽(深度优化防漏判版)
+// @description  信息流屏蔽+正文屏蔽+导航屏蔽+侧边栏屏蔽+评论用户屏蔽+自定义分组屏蔽+广告图片屏蔽+搜索页组合广告屏蔽+共创微博屏蔽+图片广告标签屏蔽(深度优化防漏判版)
 // @author       MRBANK
 // @match        https://weibo.com/*
 // @match        https://*.weibo.com/*
@@ -27,7 +27,8 @@
         blockImages: GM_getValue('blockImages', true),
         blockTopNav: GM_getValue('blockTopNav', true),
         blockAdImages: GM_getValue('blockAdImages', true),
-        blockSearchBannerAds: GM_getValue('blockSearchBannerAds', false), // 搜索页横幅图片广告独立开关，默认关闭
+        blockSearchBannerAds: GM_getValue('blockSearchBannerAds', false),
+        blockCoCreate: GM_getValue('blockCoCreate', true),
         debugMode: GM_getValue('debugMode', false),
 
         // 信息流标签关键词（可增删）
@@ -79,8 +80,14 @@
             tagContainer: '.wbpro-tag div, .wbpro-tag, p.from > span',
             feedContent: '[class*="_wbtext_"], [class*="Feed_content"] [class*="txt"], [class*="content"] [class*="txt"], p.txt',
             sidebarModule: '.wbpro-side',
-            sidebarTitle: '.wbpro-side-tit [class*="cla"], .wbpro-side-tit > div' // 修复：兼容f14/f16等多种标题类名
-        }
+            sidebarTitle: '.wbpro-side-tit [class*="cla"], .wbpro-side-tit > div'
+        },
+
+        // 广告图片标签URL特征（与"广告"关键词联动）
+        adTagImagePatterns: [
+            'icon_auth_black.png',
+            'icon_auth_white.png'
+        ]
     };
 
     // ================== 临时配置（用于弹窗编辑）==================
@@ -108,7 +115,7 @@
 
     function log(message, type = 'info', data = null) {
         if (!CONFIG.debugMode && type !== 'error') return;
-        const prefix = '【微博屏蔽 v7.2】';
+        const prefix = '【微博屏蔽 v7.3】';
         const timestamp = new Date().toLocaleTimeString();
         switch(type) {
             case 'error': console.error(`${prefix}[${timestamp}]`, message, data || ''); break;
@@ -126,6 +133,7 @@
             blockedTopNav: 0,
             blockedComments: 0,
             blockedAdImages: 0,
+            blockedCoCreate: 0,
             executionTime: 0
         },
         start() { return performance.now(); },
@@ -237,7 +245,28 @@
         return true;
     }
 
-    // 信息流屏蔽（防异步漏判 + 防拆字去空格优化）
+    // 检测图片广告标签（与"广告"关键词联动）
+    function hasAdTagImage(container) {
+        const tagImgs = container.querySelectorAll('.wbpro-tag-img img, [class*="_tag_"] img');
+        for (let i = 0; i < tagImgs.length; i++) {
+            const src = tagImgs[i].getAttribute('src') || '';
+            if (CONFIG.adTagImagePatterns.some(pattern => src.includes(pattern))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // 检测共创微博
+    function isCoCreatePost(container) {
+        const header = container.querySelector('header');
+        if (!header) return false;
+        if (header.querySelector('a[class*="_cooperate_"]')) return true;
+        if (header.textContent.includes('的共创微博')) return true;
+        return false;
+    }
+
+    // 信息流屏蔽（防异步漏判 + 防拆字去空格优化 + 图片广告标签 + 共创微博）
     function processFeedItems() {
         if (!CONFIG.blockAds) return;
         const startTime = performanceMonitor.start();
@@ -246,6 +275,7 @@
 
         const enabledContentKeywords = CONFIG.contentKeywords.filter(kw => kw.enabled);
         const enabledTagKeywords = CONFIG.blockKeywords.filter(kw => kw.enabled);
+        const adKeywordEnabled = enabledTagKeywords.some(kw => kw.text === '广告');
 
         Array.from(feedItems).slice(0, CONFIG.batchSize).forEach(container => {
             try {
@@ -254,13 +284,12 @@
 
                 const isSearchCard = container.matches('div.card-wrap[action-type="feed_list_item"]');
 
+                // === 1. 文字标签关键词匹配（原有逻辑） ===
                 const tagElements = container.querySelectorAll(CONFIG.selectors.tagContainer);
-                // 判断标签是否已经渲染出来
                 let hasTagsRendered = tagElements.length > 0 && Array.from(tagElements).some(el => el.textContent.trim().length > 0);
 
                 if (hasTagsRendered) {
                     for (let i = 0; i < tagElements.length; i++) {
-                        // 优化：去除所有空格和换行，防止微博拆字防屏蔽（如 <span>广</span><span>告</span>）
                         const tagText = tagElements[i].textContent.replace(/\s+/g, '');
                         if (tagText) {
                             const matchedTag = enabledTagKeywords.find(kw => tagText.includes(kw.text));
@@ -273,6 +302,19 @@
                     }
                 }
 
+                // === 2. 图片广告标签检测（与"广告"关键词联动） ===
+                if (!shouldBlock && adKeywordEnabled && hasAdTagImage(container)) {
+                    shouldBlock = true;
+                    blockReason = '标签:广告(图片)';
+                }
+
+                // === 3. 共创微博检测 ===
+                if (!shouldBlock && CONFIG.blockCoCreate && isCoCreatePost(container)) {
+                    shouldBlock = true;
+                    blockReason = '共创微博';
+                }
+
+                // === 4. 正文关键词匹配（原有逻辑） ===
                 if (!shouldBlock && enabledContentKeywords.length > 0) {
                     const contentText = getContentText(container);
                     if (contentText) {
@@ -285,28 +327,33 @@
                 }
 
                 if (shouldBlock) {
-                    container.setAttribute('data-processed', 'true'); // 屏蔽了才彻底标记
+                    container.setAttribute('data-processed', 'true');
                     if (isSearchCard) {
                         if (!container.classList.contains('weibo-ad-blocked')) {
                             container.classList.add('weibo-ad-blocked');
                             blockedCount++;
-                            performanceMonitor.stats.blockedItems++;
+                            if (blockReason === '共创微博') {
+                                performanceMonitor.stats.blockedCoCreate++;
+                            } else {
+                                performanceMonitor.stats.blockedItems++;
+                            }
                             log(`屏蔽搜索页信息流: ${blockReason}`, 'success');
                         }
                     } else {
                         if (markBlockedContent(container)) {
                             blockedCount++;
-                            performanceMonitor.stats.blockedItems++;
+                            if (blockReason === '共创微博') {
+                                performanceMonitor.stats.blockedCoCreate++;
+                            } else {
+                                performanceMonitor.stats.blockedItems++;
+                            }
                             log(`屏蔽首页信息流: ${blockReason}`, 'success');
                         }
                     }
                 } else {
-                    // 如果没屏蔽，判断是否已经渲染完毕
-                    // 如果有标签了，或者有正文内容了，说明渲染完毕且安全，打上标记不再扫描
                     if (hasTagsRendered || getContentText(container)) {
                         container.setAttribute('data-processed', 'true');
                     }
-                    // 否则：既没标签又没正文，可能还在异步加载，不标记，留给下一次扫描
                 }
             } catch (e) { log('处理信息流出错', 'error', e); }
         });
@@ -450,7 +497,6 @@
         const startTime = performanceMonitor.start();
         let blockedCount = 0;
         try {
-            // 1. 处理主评论
             document.querySelectorAll('.item1 > .item1in .text > a[href*="/u/"]').forEach(link => {
                 const commentUnit = link.closest('.item1');
                 if (!commentUnit || commentUnit.closest('.weibo-comment-blocked') || commentUnit.hasAttribute('data-comment-main-processed')) return;
@@ -466,11 +512,9 @@
                     performanceMonitor.stats.blockedComments++;
                     log(`屏蔽评论线程(主评论): 用户 "${authorName}"`, 'success');
                 }
-                // 无论是否屏蔽，标记主评论已处理，避免影响子评论判断
                 commentUnit.setAttribute('data-comment-main-processed', 'true');
             });
 
-            // 2. 处理二级回复
             document.querySelectorAll('.item2 .text > a[href*="/u/"]').forEach(link => {
                 const subCommentUnit = link.closest('.item2');
                 if (!subCommentUnit || subCommentUnit.closest('.weibo-comment-blocked') || subCommentUnit.hasAttribute('data-comment-sub-processed')) return;
@@ -481,7 +525,6 @@
                     performanceMonitor.stats.blockedComments++;
                     log(`屏蔽二级回复: 用户 "${authorName}"`, 'success');
                 }
-                // 无论是否屏蔽，标记该二级回复已处理
                 subCommentUnit.setAttribute('data-comment-sub-processed', 'true');
             });
         } catch (e) { log('处理评论出错', 'error', e); }
@@ -557,9 +600,7 @@
                 iconContainer.setAttribute('data-search-ad-processed', 'true');
                 const icon = iconContainer.querySelector('i[style*="simg.s.weibo.com/imgtool"]');
                 if (icon) {
-                    // 优化：向上寻找包含图文组合的 wrap-continuous 容器
                     const adWrap = iconContainer.closest('div.card-wrap.wrap-continuous');
-                    // 如果找到了大容器，就隐藏大容器；找不到，退而求其次只隐藏图片横幅
                     const targetToHide = adWrap || iconContainer;
 
                     if (!targetToHide.classList.contains('weibo-ad-blocked')) {
@@ -606,6 +647,9 @@
             </div>
             <div class="wb-adblocker-content">
                 <div class="tab-pane active" id="tab-feed">
+                    <div class="feed-tip" style="margin-bottom:12px;padding:10px 12px;background:#fff8f0;border-radius:8px;border:1px solid #ffe0b2;font-size:12px;color:#999;line-height:1.5;">
+                        提示：勾选"广告"关键词将同时屏蔽文字版和图片版广告标签
+                    </div>
                     <div class="keyword-list" data-type="blockKeywords"></div>
                     <div class="add-keyword">
                         <input type="text" placeholder="添加新关键词 (搜索页同样生效)" data-type="blockKeywords">
@@ -646,6 +690,13 @@
                             <span class="keyword-text">启用搜索页横幅广告屏蔽</span>
                         </label>
                         <div class="master-toggle-desc">自动识别微博搜索页顶部的横幅图片广告并隐藏（独立开关，不影响信息流关键词屏蔽）</div>
+                    </div>
+                    <div class="master-toggle" style="margin-top: 12px;">
+                        <label>
+                            <input type="checkbox" class="keyword-enable" data-config-key="blockCoCreate" ${TEMP_CONFIG.blockCoCreate ? 'checked' : ''}>
+                            <span class="keyword-text">启用共创微博屏蔽</span>
+                        </label>
+                        <div class="master-toggle-desc">自动识别并屏蔽品牌共创微博（header含"的共创微博"标识的推广内容）</div>
                     </div>
                     <div class="keyword-list" data-type="adImageDomains"></div>
                     <div class="add-keyword">
@@ -765,6 +816,7 @@
             performanceMonitor.stats.blockedSidebars = 0;
             performanceMonitor.stats.blockedComments = 0;
             performanceMonitor.stats.blockedAdImages = 0;
+            performanceMonitor.stats.blockedCoCreate = 0;
             processContent();
             closeConfigUI();
         });
@@ -826,18 +878,16 @@
 
     function setupScrollListener() { window.addEventListener('scroll', throttle(processContent, CONFIG.scrollThrottle), { passive: true }); }
 
-    // 新增：定时轮询兜底，防止 SPA 静默更新或异步渲染漏判
     function setupPolling() {
         setInterval(() => {
             processContent();
-        }, 2500); // 每 2.5 秒扫描一次全页未处理节点
+        }, 2500);
     }
 
     function setupMenuCommands() {
         GM_registerMenuCommand('打开配置面板', openConfigUI);
         GM_registerMenuCommand('切换调试模式', () => { CONFIG.debugMode = !CONFIG.debugMode; GM_setValue('debugMode', CONFIG.debugMode); alert(`调试模式已${CONFIG.debugMode ? '开启' : '关闭'}`); location.reload(); });
-        GM_registerMenuCommand('查看统计信息', () => { performanceMonitor.report(); alert(`已屏蔽内容统计：\n- 信息流: ${performanceMonitor.stats.blockedItems}\n- 侧边栏模块: ${performanceMonitor.stats.blockedSidebars}\n- 顶部导航: ${performanceMonitor.stats.blockedTopNav}\n- 评论: ${performanceMonitor.stats.blockedComments}\n- 广告图片: ${performanceMonitor.stats.blockedAdImages}\n- 执行时间: ${performanceMonitor.stats.executionTime.toFixed(2)}ms`); });
-        // 新增：手动全量重扫
+        GM_registerMenuCommand('查看统计信息', () => { performanceMonitor.report(); alert(`已屏蔽内容统计：\n- 信息流: ${performanceMonitor.stats.blockedItems}\n- 共创微博: ${performanceMonitor.stats.blockedCoCreate}\n- 侧边栏模块: ${performanceMonitor.stats.blockedSidebars}\n- 顶部导航: ${performanceMonitor.stats.blockedTopNav}\n- 评论: ${performanceMonitor.stats.blockedComments}\n- 广告图片: ${performanceMonitor.stats.blockedAdImages}\n- 执行时间: ${performanceMonitor.stats.executionTime.toFixed(2)}ms`); });
         GM_registerMenuCommand('⚡ 强制全量重扫页面', () => {
             document.querySelectorAll('[data-processed="true"], [data-sidebar-processed="true"], [data-comment-unit-processed="true"], [data-comment-main-processed="true"], [data-comment-sub-processed="true"], [data-flat-processed="true"], [data-ad-img-processed="true"], [data-search-ad-processed="true"]').forEach(el => {
                 el.removeAttribute('data-processed');
@@ -908,6 +958,7 @@
         else if (Array.isArray(adImgVal) && adImgVal.length > 0 && typeof adImgVal[0] === 'string') { CONFIG.adImageDomains = adImgVal.map(text => ({ text, enabled: true })); GM_setValue('adImageDomains', CONFIG.adImageDomains); }
 
         if (GM_getValue('blockAdImages', null) === null) { GM_setValue('blockAdImages', true); }
+        if (GM_getValue('blockCoCreate', null) === null) { GM_setValue('blockCoCreate', true); log('初始化共创微博屏蔽开关: true', 'info'); }
 
         if (GM_getValue('blockSearchAds', null) !== null) { GM_deleteValue('blockSearchAds'); }
         if (GM_getValue('blockSearchBannerAds', null) === null) { GM_setValue('blockSearchBannerAds', false); log('初始化搜索页横幅广告屏蔽开关: false', 'info'); }
