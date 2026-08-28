@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         网页表格提取助手
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.3
 // @description  表格提取/附件下载/数据聚合 - 支持嵌套iframe和动态表格，新增长数字文本化选项与表格快捷导出按钮
-// @author       MRBANK
+// @author       MRBANK (modified)
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        GM_setValue
@@ -28,7 +28,7 @@
 
     // 全局配置
     const CONFIG = {
-        version: '2.1',
+        version: '2.3',
         lastScannedTables: [],
         selectedFileTypes: new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.rtf', '.mp3', '.mp4', '.avi', '.wmv', '.mov', '.flv', '.wav']),
         customFileTypes: new Set(),
@@ -282,16 +282,48 @@
         }
     }
 
+    // 检查表格是否在编辑器内部（contenteditable、textarea、富文本编辑器等）
+    function isInsideEditor(table) {
+        try {
+            let el = table.parentElement;
+            while (el && el !== document.body) {
+                const tag = el.tagName;
+                // 排除 contenteditable 元素
+                if (el.contentEditable === 'true' || el.getAttribute('contenteditable') === 'true') return true;
+                // 排除 textarea
+                if (tag === 'TEXTAREA') return true;
+                // 排除常见的编辑器容器类名/ID
+                const cls = (el.className || '').toLowerCase();
+                const id = (el.id || '').toLowerCase();
+                if (/editor|eeditor|wysiwyg|tinymce|ckeditor|ueditor|kindeditor|simditor|quill|prosemirror|draftjs|contenteditable|compose|write|reply|postform|fastpost|postbox/.test(cls) ||
+                    /editor|eeditor|wysiwyg|tinymce|ckeditor|ueditor|kindeditor|compose|write|reply|postform|fastpost|postbox/.test(id)) {
+                    return true;
+                }
+                // 排除 role="textbox"
+                if (el.getAttribute('role') === 'textbox') return true;
+                // 排除 Discuz 特有的编辑区域
+                if (el.getAttribute('id') === 'postform' || el.classList.contains('p_pst')) return true;
+                el = el.parentElement;
+            }
+            return false;
+        } catch (e) {
+            return false;
+        }
+    }
+
     // 启发式判断是否为数据表格
     function isDataTableHeuristic(table) {
         try {
+            // 排除编辑器内部的表格
+            if (isInsideEditor(table)) return false;
+
             // 检查是否有足够的行和列
             const rows = table.rows.length;
             if (rows < 1) return false;
 
-            // 检查是否有表头
-            const hasHeader = table.querySelector('th') !== null ||
-                             (table.rows[0] && table.rows[0].cells.length > 0);
+            // 检查是否有真正的 th 表头（而不是仅检查是否有 cells）
+            const hasRealHeader = table.querySelector('th') !== null;
+            const hasCells = table.rows[0] && table.rows[0].cells.length > 0;
 
             // 检查是否有数据单元格
             let dataCellCount = 0;
@@ -304,9 +336,10 @@
             // 检查表格结构
             const structureScore = calculateTableStructureScore(table);
 
-            return (hasHeader && dataCellCount > 3) || structureScore > 0.3;
+            // 提高判断门槛：需要真正的 th 表头 + 足够单元格，或更高的结构评分
+            return (hasRealHeader && dataCellCount > 3) || structureScore > 0.5;
         } catch (e) {
-            return true; // 如果检查出错，默认认为是数据表格
+            return false; // 出错时默认排除，避免误判
         }
     }
 
@@ -368,7 +401,7 @@
                 CONFIG.iframeScanDepth = enhancedSettings.iframeScanDepth || 3;
                 CONFIG.maxIframesToScan = enhancedSettings.maxIframesToScan || 20;
                 CONFIG.dynamicDataTimeout = enhancedSettings.dynamicDataTimeout || 3000;
-                CONFIG.observerEnabled = enhancedSettings.observerEnabled !== false;
+                CONFIG.observerEnabled = enhancedSettings.observerEnabled === true;
                 CONFIG.exportLinks = enhancedSettings.exportLinks !== false;
                 CONFIG.linkFormat = enhancedSettings.linkFormat || 'excel';
                 // ========== 新增：加载长数字文本化选项 ==========
@@ -407,7 +440,7 @@
             }
 
             /* 模态框 */
-            .dl-modal {
+            #data-liberator-modal-container .dl-modal {
                 background: white;
                 border-radius: 10px;
                 max-width: 800px;
@@ -427,7 +460,7 @@
             }
 
             /* 优化后的模态框头部布局 */
-            .dl-modal-header {
+            #data-liberator-modal-container .dl-modal-header {
                 padding: 20px;
                 border-bottom: 1px solid #eee;
                 display: flex;
@@ -437,7 +470,7 @@
                 color: white;
             }
 
-            .dl-modal-title {
+            #data-liberator-modal-container .dl-modal-title {
                 font-size: 18px;
                 font-weight: bold;
                 flex: 1;
@@ -445,7 +478,7 @@
             }
 
             /* 优化后的关闭按钮 */
-            .dl-modal-close {
+            #data-liberator-modal-container .dl-modal-close {
                 background: rgba(255,255,255,0.2);
                 border: none;
                 font-size: 20px;
@@ -463,13 +496,13 @@
                 margin-left: 10px;
             }
 
-            .dl-modal-close:hover {
+            #data-liberator-modal-container .dl-modal-close:hover {
                 background: rgba(255,255,255,0.3);
                 transform: scale(1.1);
             }
 
             /* 优化后的返回按钮 */
-            .dl-modal-back {
+            #data-liberator-modal-container .dl-modal-back {
                 background: rgba(255,255,255,0.2);
                 border: none;
                 font-size: 14px;
@@ -484,25 +517,25 @@
                 font-weight: 600;
             }
 
-            .dl-modal-back:hover {
+            #data-liberator-modal-container .dl-modal-back:hover {
                 background: rgba(255,255,255,0.3);
                 transform: translateY(-2px);
             }
 
-            .dl-modal-back::before {
+            #data-liberator-modal-container .dl-modal-back::before {
                 content: '←';
                 margin-right: 8px;
                 font-weight: bold;
                 font-size: 16px;
             }
 
-            .dl-modal-body {
+            #data-liberator-modal-container .dl-modal-body {
                 padding: 20px;
                 max-height: 60vh;
                 overflow-y: auto;
             }
 
-            .dl-modal-footer {
+            #data-liberator-modal-container .dl-modal-footer {
                 padding: 20px;
                 border-top: 1px solid #eee;
                 display: flex;
@@ -511,7 +544,7 @@
             }
 
             /* 按钮 */
-            .dl-btn {
+            #data-liberator-modal-container .dl-btn {
                 padding: 10px 20px;
                 border: none;
                 border-radius: 5px;
@@ -522,37 +555,37 @@
                 min-width: 100px;
             }
 
-            .dl-btn-primary {
+            #data-liberator-modal-container .dl-btn-primary {
                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                 color: white;
             }
 
-            .dl-btn-secondary {
+            #data-liberator-modal-container .dl-btn-secondary {
                 background: #6c757d;
                 color: white;
             }
 
-            .dl-btn-success {
+            #data-liberator-modal-container .dl-btn-success {
                 background: #28a745;
                 color: white;
             }
 
-            .dl-btn-warning {
+            #data-liberator-modal-container .dl-btn-warning {
                 background: #ffc107;
                 color: #212529;
             }
 
-            .dl-btn-danger {
+            #data-liberator-modal-container .dl-btn-danger {
                 background: #dc3545;
                 color: white;
             }
 
-            .dl-btn:hover:not(:disabled) {
+            #data-liberator-modal-container .dl-btn:hover:not(:disabled) {
                 opacity: 0.9;
                 transform: translateY(-1px);
             }
 
-            .dl-btn:disabled {
+            #data-liberator-modal-container .dl-btn:disabled {
                 opacity: 0.6;
                 cursor: not-allowed;
             }
@@ -612,7 +645,7 @@
             }
 
             /* 进度条 */
-            .dl-progress {
+            #data-liberator-modal-container .dl-progress {
                 width: 100%;
                 height: 20px;
                 background: #f0f0f0;
@@ -621,7 +654,7 @@
                 margin: 10px 0;
             }
 
-            .dl-progress-bar {
+            #data-liberator-modal-container .dl-progress-bar {
                 height: 100%;
                 background: linear-gradient(90deg, #4CAF50, #8BC34A);
                 transition: width 0.3s ease;
@@ -629,14 +662,14 @@
             }
 
             /* 文件格式选择器 */
-            .dl-file-types {
+            #data-liberator-modal-container .dl-file-types {
                 display: flex;
                 flex-wrap: wrap;
                 gap: 10px;
                 margin: 15px 0;
             }
 
-            .dl-file-type-item {
+            #data-liberator-modal-container .dl-file-type-item {
                 padding: 8px 15px;
                 border: 1px solid #ddd;
                 border-radius: 20px;
@@ -646,29 +679,29 @@
                 position: relative;
             }
 
-            .dl-file-type-item:hover {
+            #data-liberator-modal-container .dl-file-type-item:hover {
                 background: #f0f7ff;
                 border-color: #667eea;
             }
 
-            .dl-file-type-item.selected {
+            #data-liberator-modal-container .dl-file-type-item.selected {
                 background: #667eea;
                 color: white;
                 border-color: #667eea;
             }
 
-            .dl-file-type-item.custom {
+            #data-liberator-modal-container .dl-file-type-item.custom {
                 border-style: dashed;
                 border-color: #ff9800;
             }
 
-            .dl-file-type-item.custom.selected {
+            #data-liberator-modal-container .dl-file-type-item.custom.selected {
                 background: #ff9800;
                 color: white;
                 border-color: #ff9800;
             }
 
-            .remove-custom-format {
+            #data-liberator-modal-container .remove-custom-format {
                 position: absolute;
                 top: -5px;
                 right: -5px;
@@ -686,12 +719,12 @@
                 transition: opacity 0.2s;
             }
 
-            .dl-file-type-item.custom:hover .remove-custom-format {
+            #data-liberator-modal-container .dl-file-type-item.custom:hover .remove-custom-format {
                 opacity: 1;
             }
 
             /* 文件列表 */
-            .dl-file-list {
+            #data-liberator-modal-container .dl-file-list {
                 max-height: 300px;
                 overflow-y: auto;
                 border: 1px solid #eee;
@@ -699,7 +732,7 @@
                 margin: 15px 0;
             }
 
-            .dl-file-item {
+            #data-liberator-modal-container .dl-file-item {
                 padding: 12px;
                 border-bottom: 1px solid #eee;
                 display: flex;
@@ -707,38 +740,38 @@
                 transition: background 0.2s;
             }
 
-            .dl-file-item:hover {
+            #data-liberator-modal-container .dl-file-item:hover {
                 background: #f9f9f9;
             }
 
-            .dl-file-item:last-child {
+            #data-liberator-modal-container .dl-file-item:last-child {
                 border-bottom: none;
             }
 
-            .dl-file-checkbox {
+            #data-liberator-modal-container .dl-file-checkbox {
                 margin-right: 10px;
             }
 
-            .dl-file-icon {
+            #data-liberator-modal-container .dl-file-icon {
                 font-size: 20px;
                 margin-right: 10px;
                 width: 24px;
                 text-align: center;
             }
 
-            .dl-file-info {
+            #data-liberator-modal-container .dl-file-info {
                 flex: 1;
                 overflow: hidden;
             }
 
-            .dl-file-name {
+            #data-liberator-modal-container .dl-file-name {
                 font-weight: 600;
                 white-space: nowrap;
                 overflow: hidden;
                 text-overflow: ellipsis;
             }
 
-            .dl-file-url {
+            #data-liberator-modal-container .dl-file-url {
                 font-size: 12px;
                 color: #666;
                 white-space: nowrap;
@@ -747,7 +780,7 @@
             }
 
             /* 表格预览 */
-            .dl-table-preview {
+            #data-liberator-modal-container .dl-table-preview {
                 max-height: 300px;
                 overflow: auto;
                 border: 1px solid #ddd;
@@ -755,13 +788,13 @@
                 margin: 15px 0;
             }
 
-            .dl-table-preview table {
+            #data-liberator-modal-container .dl-table-preview table {
                 width: 100%;
                 border-collapse: collapse;
                 font-size: 12px;
             }
 
-            .dl-table-preview th {
+            #data-liberator-modal-container .dl-table-preview th {
                 background: #f8f9fa;
                 font-weight: bold;
                 padding: 8px;
@@ -769,24 +802,24 @@
                 text-align: left;
             }
 
-            .dl-table-preview td {
+            #data-liberator-modal-container .dl-table-preview td {
                 padding: 8px;
                 border: 1px solid #ddd;
             }
 
             /* 配置组 */
-            .dl-config-group {
+            #data-liberator-modal-container .dl-config-group {
                 margin-bottom: 20px;
             }
 
-            .dl-config-label {
+            #data-liberator-modal-container .dl-config-label {
                 display: block;
                 margin-bottom: 8px;
                 font-weight: 600;
                 color: #333;
             }
 
-            .dl-config-input {
+            #data-liberator-modal-container .dl-config-input {
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
@@ -794,7 +827,7 @@
                 font-size: 14px;
             }
 
-            .dl-config-select {
+            #data-liberator-modal-container .dl-config-select {
                 width: 100%;
                 padding: 10px;
                 border: 1px solid #ddd;
@@ -804,43 +837,43 @@
             }
 
             /* 状态消息 */
-            .dl-status {
+            #data-liberator-modal-container .dl-status {
                 padding: 12px;
                 border-radius: 5px;
                 margin: 10px 0;
                 display: none;
             }
 
-            .dl-status.show {
+            #data-liberator-modal-container .dl-status.show {
                 display: block;
             }
 
-            .dl-status-success {
+            #data-liberator-modal-container .dl-status-success {
                 background: #d4edda;
                 color: #155724;
                 border: 1px solid #c3e6cb;
             }
 
-            .dl-status-error {
+            #data-liberator-modal-container .dl-status-error {
                 background: #f8d7da;
                 color: #721c24;
                 border: 1px solid #f5c6cb;
             }
 
-            .dl-status-info {
+            #data-liberator-modal-container .dl-status-info {
                 background: #d1ecf1;
                 color: #0c5460;
                 border: 1px solid #bee5eb;
             }
 
             /* 选项卡 */
-            .dl-tabs {
+            #data-liberator-modal-container .dl-tabs {
                 display: flex;
                 border-bottom: 1px solid #ddd;
                 margin-bottom: 20px;
             }
 
-            .dl-tab {
+            #data-liberator-modal-container .dl-tab {
                 padding: 10px 20px;
                 cursor: pointer;
                 border: 1px solid transparent;
@@ -850,59 +883,59 @@
                 transition: all 0.2s;
             }
 
-            .dl-tab:hover {
+            #data-liberator-modal-container .dl-tab:hover {
                 background: #f5f5f5;
             }
 
-            .dl-tab.active {
+            #data-liberator-modal-container .dl-tab.active {
                 background: white;
                 border-color: #ddd #ddd white #ddd;
                 font-weight: bold;
                 color: #667eea;
             }
 
-            .dl-tab-content {
+            #data-liberator-modal-container .dl-tab-content {
                 display: none;
             }
 
-            .dl-tab-content.active {
+            #data-liberator-modal-container .dl-tab-content.active {
                 display: block;
             }
 
             /* 表格列表 */
-            .dl-table-list {
+            #data-liberator-modal-container .dl-table-list {
                 max-height: 300px;
                 overflow-y: auto;
                 border: 1px solid #eee;
                 border-radius: 5px;
             }
 
-            .dl-table-item {
+            #data-liberator-modal-container .dl-table-item {
                 padding: 15px;
                 border-bottom: 1px solid #eee;
                 transition: all 0.2s;
                 cursor: pointer;
             }
 
-            .dl-table-item:hover {
+            #data-liberator-modal-container .dl-table-item:hover {
                 background: #f8f9fa;
             }
 
-            .dl-table-item.selected {
+            #data-liberator-modal-container .dl-table-item.selected {
                 background: #e8f5e9;
                 border-left: 4px solid #4CAF50;
             }
 
-            .dl-table-item:last-child {
+            #data-liberator-modal-container .dl-table-item:last-child {
                 border-bottom: none;
             }
 
-            .dl-table-title {
+            #data-liberator-modal-container .dl-table-title {
                 font-weight: 600;
                 margin-bottom: 5px;
             }
 
-            .dl-table-info {
+            #data-liberator-modal-container .dl-table-info {
                 font-size: 12px;
                 color: #666;
                 display: flex;
@@ -911,13 +944,13 @@
             }
 
             /* 表格操作按钮 */
-            .dl-table-actions {
+            #data-liberator-modal-container .dl-table-actions {
                 display: flex;
                 gap: 10px;
                 margin-top: 10px;
             }
 
-            .dl-table-action-btn {
+            #data-liberator-modal-container .dl-table-action-btn {
                 padding: 6px 12px;
                 border: none;
                 border-radius: 4px;
@@ -927,46 +960,46 @@
                 transition: all 0.2s;
             }
 
-            .dl-table-action-highlight {
+            #data-liberator-modal-container .dl-table-action-highlight {
                 background: #4CAF50;
                 color: white;
             }
 
-            .dl-table-action-preview {
+            #data-liberator-modal-container .dl-table-action-preview {
                 background: #2196F3;
                 color: white;
             }
 
-            .dl-table-action-export {
+            #data-liberator-modal-container .dl-table-action-export {
                 background: #FF9800;
                 color: white;
             }
 
-            .dl-table-action-btn:hover {
+            #data-liberator-modal-container .dl-table-action-btn:hover {
                 opacity: 0.9;
                 transform: translateY(-1px);
             }
 
             /* 批量下载设置 */
-            .dl-batch-settings {
+            #data-liberator-modal-container .dl-batch-settings {
                 background: #f8f9fa;
                 padding: 15px;
                 border-radius: 5px;
                 margin: 15px 0;
             }
 
-            .dl-setting-row {
+            #data-liberator-modal-container .dl-setting-row {
                 display: flex;
                 align-items: center;
                 margin-bottom: 10px;
             }
 
-            .dl-setting-label {
+            #data-liberator-modal-container .dl-setting-label {
                 width: 120px;
                 font-weight: 600;
             }
 
-            .dl-setting-value {
+            #data-liberator-modal-container .dl-setting-value {
                 flex: 1;
             }
 
@@ -1001,62 +1034,62 @@
             }
 
             /* 帮助内容 */
-            .dl-help-content {
+            #data-liberator-modal-container .dl-help-content {
                 line-height: 1.6;
             }
 
-            .dl-help-section {
+            #data-liberator-modal-container .dl-help-section {
                 margin-bottom: 20px;
             }
 
-            .dl-help-title {
+            #data-liberator-modal-container .dl-help-title {
                 font-weight: bold;
                 color: #667eea;
                 margin-bottom: 10px;
                 font-size: 16px;
             }
 
-            .dl-help-list {
+            #data-liberator-modal-container .dl-help-list {
                 padding-left: 20px;
                 margin: 10px 0;
             }
 
-            .dl-help-list li {
+            #data-liberator-modal-container .dl-help-list li {
                 margin-bottom: 5px;
             }
 
             /* 响应式调整 */
             @media (max-width: 768px) {
-                .dl-modal {
+                #data-liberator-modal-container .dl-modal {
                     width: 95%;
                     max-height: 95vh;
                 }
 
-                .dl-btn {
+                #data-liberator-modal-container .dl-btn {
                     min-width: auto;
                     padding: 8px 15px;
                 }
 
-                .dl-table-actions {
+                #data-liberator-modal-container .dl-table-actions {
                     flex-direction: column;
                 }
 
-                .dl-modal-header {
+                #data-liberator-modal-container .dl-modal-header {
                     flex-wrap: wrap;
                 }
 
-                .dl-modal-title {
+                #data-liberator-modal-container .dl-modal-title {
                     order: 2;
                     width: 100%;
                     margin-top: 10px;
                     margin-bottom: 10px;
                 }
 
-                .dl-modal-back {
+                #data-liberator-modal-container .dl-modal-back {
                     order: 1;
                 }
 
-                .dl-modal-close {
+                #data-liberator-modal-container .dl-modal-close {
                     order: 3;
                 }
             }
@@ -1130,7 +1163,7 @@
             }
 
             /* 增强表格项样式 */
-            .dl-table-item .table-source {
+            #data-liberator-modal-container .dl-table-item .table-source {
                 font-size: 12px;
                 color: #666;
                 margin-left: 10px;
@@ -1138,7 +1171,7 @@
             }
 
             /* 深度指示器 */
-            .depth-indicator {
+            #data-liberator-modal-container .depth-indicator {
                 display: inline-block;
                 width: 12px;
                 height: 12px;
@@ -1147,14 +1180,14 @@
                 background: #ddd;
             }
 
-            .depth-1 { background: #4CAF50; }
-            .depth-2 { background: #2196F3; }
-            .depth-3 { background: #ff9800; }
-            .depth-4 { background: #f44336; }
-            .depth-5 { background: #9C27B0; }
+            #data-liberator-modal-container .depth-1 { background: #4CAF50; }
+            #data-liberator-modal-container .depth-2 { background: #2196F3; }
+            #data-liberator-modal-container .depth-3 { background: #ff9800; }
+            #data-liberator-modal-container .depth-4 { background: #f44336; }
+            #data-liberator-modal-container .depth-5 { background: #9C27B0; }
 
             /* iframe相关样式 */
-            .iframe-info {
+            #data-liberator-modal-container .iframe-info {
                 font-size: 11px;
                 color: #666;
                 padding: 2px 6px;
@@ -1164,7 +1197,7 @@
             }
 
             /* 隐藏表格标识 */
-            .hidden-table-marker {
+            #data-liberator-modal-container .hidden-table-marker {
                 color: #ff9800;
                 font-size: 12px;
                 margin-left: 10px;
@@ -1298,6 +1331,9 @@
 
     function handleNewTable(table) {
         if (!observedTables.has(table)) {
+            // 跳过编辑器内部的表格
+            if (isInsideEditor(table)) return;
+
             observedTables.add(table);
 
             // 记录表格的初始状态
@@ -1739,6 +1775,9 @@
     function highlightTable(table, persistent = false) {
         if (!table) return;
 
+        // 跳过编辑器内部的表格
+        if (isInsideEditor(table)) return;
+
         // 清除临时高亮
         document.querySelectorAll('.dl-table-highlight:not(.dl-table-highlight-persist)').forEach(t => {
             t.classList.remove('dl-table-highlight');
@@ -1762,6 +1801,8 @@
     function highlightAllTables(tables) {
         tables.forEach(table => {
             if (table && table.classList) {
+                // 跳过编辑器内部的表格
+                if (isInsideEditor(table)) return;
                 table.classList.add('dl-table-highlight-persist');
                 CONFIG.lastHighlightedTables.add(table);
             }
@@ -2891,8 +2932,12 @@
         // 先移除所有已有的按钮，避免重复
         removeAllExportButtons();
 
+        let addedCount = 0;
         tables.forEach(table => {
             if (!table) return;
+
+            // 跳过编辑器内部的表格
+            if (isInsideEditor(table)) return;
 
             // 为表格添加相对定位类，以便按钮绝对定位
             table.classList.add('dl-table-with-export-btn');
@@ -2912,9 +2957,14 @@
 
             // 将按钮添加到表格中（作为第一个子元素，便于定位）
             table.insertBefore(btn, table.firstChild);
+            addedCount++;
         });
 
-        showNotification(`已为 ${tables.length} 个表格添加导出按钮`, 'success');
+        if (addedCount > 0) {
+            showNotification(`已为 ${addedCount} 个表格添加导出按钮`, 'success');
+        } else {
+            showNotification('没有可添加导出按钮的表格', 'info');
+        }
     }
 
     function removeAllExportButtons() {
