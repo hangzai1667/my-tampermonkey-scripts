@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      2.3
 // @description  表格提取/附件下载/数据聚合 - 支持嵌套iframe和动态表格，新增长数字文本化选项与表格快捷导出按钮
-// @author       MRBANK (modified)
+// @author       MRBANK
 // @match        *://*/*
 // @grant        GM_addStyle
 // @grant        GM_setValue
