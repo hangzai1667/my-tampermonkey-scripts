@@ -8,7 +8,8 @@
 // @grant        GM_registerMenuCommand
 // @run-at       document-end
 // ==/UserScript==
-
+// @downloadURL  https://cdn.jsdelivr.net/gh/hangzai1667/my-tampermonkey-scripts@main/bilibili.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/hangzai1667/my-tampermonkey-scripts@main/bilibili.user.js
 (function() {
     'use strict';
 
